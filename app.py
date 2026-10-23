@@ -6,7 +6,9 @@ from google import genai
 from google.genai import types
 from supabase import create_client
 
-# ---------------- PAGE CONFIG ----------------
+# ==================================================
+# PAGE CONFIGURATION
+# ==================================================
 
 st.set_page_config(
     page_title="QuizCraft AI",
@@ -15,67 +17,68 @@ st.set_page_config(
 )
 
 MODEL_NAME = "gemini-2.5-flash"
+# or the cheaper one:
+# MODEL_NAME = "gemini-2.5-flash-lite"
 TOTAL_QUESTIONS = 20
+MAX_PDF_SIZE = 20 * 1024 * 1024
 
-# ---------------- PROFESSIONAL DESIGN ----------------
+# ==================================================
+# DESIGN
+# ==================================================
 
 st.markdown("""
 <style>
-    .main {
-        background-color: #f7f9fc;
-    }
     .block-container {
+        max-width: 1050px;
         padding-top: 2rem;
         padding-bottom: 3rem;
-        max-width: 1050px;
     }
+
     .hero {
-        padding: 28px;
-        border-radius: 18px;
         background: linear-gradient(120deg, #172554, #4338ca);
+        padding: 30px;
+        border-radius: 18px;
         color: white;
-        margin-bottom: 24px;
+        margin-bottom: 25px;
     }
+
     .hero h1 {
         color: white;
         font-size: 38px;
-        margin-bottom: 8px;
     }
+
     .hero p {
         color: #e0e7ff;
         font-size: 16px;
     }
-    .question-card {
-        background: white;
-        border: 1px solid #e2e8f0;
-        border-radius: 14px;
-        padding: 18px;
-        margin-bottom: 12px;
-    }
+
     div.stButton > button {
         border-radius: 10px;
         font-weight: 600;
-        min-height: 44px;
+        min-height: 42px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- SECRETS AND CONNECTIONS ----------------
+# ==================================================
+# SECRETS
+# ==================================================
 
-def get_secret(name, default=None):
+def get_secret(name):
     try:
-        value = st.secrets.get(name, default)
-        return value if value else default
+        return st.secrets.get(name)
     except Exception:
-        return default
+        return None
 
 
 def get_gemini_client():
     api_key = get_secret("GEMINI_API_KEY")
+
     if not api_key:
         raise ValueError(
-            "GEMINI_API_KEY is missing from Streamlit Secrets."
+            "GEMINI_API_KEY is missing. Add it to Streamlit Secrets."
         )
+
     return genai.Client(api_key=api_key)
 
 
@@ -89,24 +92,12 @@ def get_supabase_client():
     return create_client(url, key)
 
 
-# ---------------- PDF QUIZ GENERATOR ----------------
+# ==================================================
+# GENERATE QUIZ FROM PDF
+# ==================================================
 
-def clean_json_response(text):
-    """Convert Gemini's JSON response into a Python object."""
-    text = text.strip()
+def generate_quiz(pdf_bytes, difficulty):
 
-    # Remove optional Markdown code fences.
-    text = re.sub(
-        r"^```(?:json)?\s*|\s*```$",
-        "",
-        text,
-        flags=re.IGNORECASE
-    )
-
-    return json.loads(text)
-
-
-def generate_quiz(pdf_bytes, filename, difficulty):
     client = get_gemini_client()
 
     pdf_part = types.Part.from_bytes(
@@ -115,45 +106,47 @@ def generate_quiz(pdf_bytes, filename, difficulty):
     )
 
     prompt = f"""
-You are an expert educational quiz creator.
+You are an expert educational quiz generator.
 
-Read the attached PDF carefully. Generate exactly 20 different
-multiple-choice questions using information from this PDF only.
+Read the attached PDF and create exactly 20 distinct
+multiple-choice questions using the PDF as your source.
+
+Difficulty: {difficulty}
 
 Requirements:
-1. Difficulty: {difficulty}.
-2. Each question must have exactly four answer options.
-3. Exactly one option must be correct.
-4. Questions must cover different important ideas from the PDF.
-5. Do not invent facts that are unsupported by the document.
-6. Do not repeat questions.
-7. Write clear, simple English.
-8. Include a short explanation for each correct answer.
-9. If the PDF is too short or unreadable to support 20 meaningful
-   questions, return an error object instead of inventing questions.
+- Use information supported by the PDF.
+- Write clear questions in simple English.
+- Include exactly four options for every question.
+- Exactly one option must be correct.
+- Cover different important topics in the PDF.
+- Do not repeat questions.
+- Include a short explanation for each answer.
+- Do not invent information.
+- If the document cannot support 20 meaningful questions,
+  return an error object instead of inventing content.
 
-Return ONLY valid JSON in this exact structure:
+Return ONLY valid JSON in this structure:
 
 {{
-  "title": "A short title for the quiz",
+  "title": "Quiz title",
   "questions": [
     {{
       "question": "Question text",
       "options": [
-        "First option",
-        "Second option",
-        "Third option",
-        "Fourth option"
+        "Option one",
+        "Option two",
+        "Option three",
+        "Option four"
       ],
       "answer": 0,
-      "explanation": "A brief explanation supported by the PDF"
+      "explanation": "Explanation based on the PDF"
     }}
   ]
 }}
 
-The answer field is a zero-based index: 0, 1, 2, or 3.
+The answer must be an integer from 0 to 3.
 The questions array must contain exactly 20 questions.
-Do not include Markdown or any text outside the JSON.
+Do not include Markdown fences or text outside the JSON.
 """
 
     response = client.models.generate_content(
@@ -161,222 +154,266 @@ Do not include Markdown or any text outside the JSON.
         contents=[prompt, pdf_part],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
-            temperature=0.3,
-            max_output_tokens=10000
+            temperature=0.2,
+            max_output_tokens=12000
         )
     )
 
     if not response.text:
-        raise ValueError("Gemini returned an empty response.")
-
-    data = clean_json_response(response.text)
-
-    if "error" in data:
-        raise ValueError(str(data["error"]))
-
-    questions = data.get("questions")
-
-    if not isinstance(questions, list) or len(questions) != TOTAL_QUESTIONS:
         raise ValueError(
-            "The PDF did not produce exactly 20 questions. "
-            "Try a clearer or more detailed PDF."
+            "Gemini returned an empty response. Try again."
         )
 
-    # Validate every question before displaying the quiz.
-    for number, question in enumerate(questions, start=1):
-        if not isinstance(question, dict):
+    raw_text = response.text.strip()
+
+    raw_text = re.sub(
+        r"^```(?:json)?\s*|\s*```$",
+        "",
+        raw_text,
+        flags=re.IGNORECASE
+    )
+
+    try:
+        quiz = json.loads(raw_text)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "Gemini did not return valid JSON. Try generating again."
+        ) from error
+
+    if not isinstance(quiz, dict):
+        raise ValueError("The generated quiz has an invalid format.")
+
+    if quiz.get("error"):
+        raise ValueError(str(quiz["error"]))
+
+    questions = quiz.get("questions")
+
+    if not isinstance(questions, list):
+        raise ValueError("The quiz is missing its questions list.")
+
+    if len(questions) != TOTAL_QUESTIONS:
+        raise ValueError(
+            f"Gemini generated {len(questions)} questions instead "
+            "of 20. Try a longer or more detailed PDF."
+        )
+
+    for number, item in enumerate(questions, start=1):
+
+        if not isinstance(item, dict):
             raise ValueError(f"Question {number} has an invalid format.")
 
-        if not isinstance(question.get("question"), str):
-            raise ValueError(f"Question {number} is missing its text.")
+        if not isinstance(item.get("question"), str):
+            raise ValueError(f"Question {number} has no question text.")
 
-        options = question.get("options")
-        answer = question.get("answer")
+        options = item.get("options")
 
         if (
             not isinstance(options, list)
             or len(options) != 4
-            or not all(isinstance(option, str) and option.strip()
-                       for option in options)
+            or not all(
+                isinstance(option, str) and option.strip()
+                for option in options
+            )
         ):
             raise ValueError(
-                f"Question {number} must have four valid options."
+                f"Question {number} must have four non-empty options."
             )
 
-        # bool is a subclass of int in Python, so reject it explicitly.
+        answer = item.get("answer")
+
         if type(answer) is not int or answer not in range(4):
             raise ValueError(
                 f"Question {number} has an invalid answer index."
             )
 
-        if not isinstance(question.get("explanation"), str):
+        if not isinstance(item.get("explanation"), str):
             raise ValueError(
-                f"Question {number} is missing its explanation."
+                f"Question {number} has no explanation."
             )
 
-    data["title"] = str(data.get("title") or "Your PDF Quiz")
-    return data
+    quiz["title"] = str(quiz.get("title") or "Your PDF Quiz")
+
+    return quiz
 
 
-# ---------------- SAVE RESULTS TO SUPABASE ----------------
+# ==================================================
+# SAVE RESULTS TO SUPABASE
+# ==================================================
 
-def save_result(pdf_name, quiz, answers, score):
-    try:
-        supabase = get_supabase_client()
+def save_result(pdf_name, quiz, answers, score, difficulty):
 
-        if supabase is None:
-            return False, "Supabase is not configured."
+    database = get_supabase_client()
 
-        # Do not save answer keys or explanations in a public quiz page.
-        record = {
-            "pdf_name": pdf_name,
-            "score": score,
-            "total_questions": TOTAL_QUESTIONS,
-            "questions": quiz["questions"],
-            "user_answers": answers
-        }
+    if database is None:
+        return False, (
+            "Supabase is not configured. Add SUPABASE_URL and "
+            "SUPABASE_KEY to Streamlit Secrets."
+        )
 
-        supabase.table("quiz_results").insert(record).execute()
+    record = {
+        "pdf_name": pdf_name,
+        "score": score,
+        "total_questions": TOTAL_QUESTIONS,
+        "questions": quiz["questions"],
+        "user_answers": answers,
+        "difficulty": difficulty
+    }
 
-        return True, "Quiz result saved to Supabase."
+    database.table("quiz_results").insert(record).execute()
 
-    except Exception as error:
-        # The quiz can still work when database saving fails.
-        return False, str(error)
-
-
-# ---------------- SESSION STATE ----------------
-
-if "quiz" not in st.session_state:
-    st.session_state.quiz = None
-
-if "pdf_name" not in st.session_state:
-    st.session_state.pdf_name = None
-
-if "submitted" not in st.session_state:
-    st.session_state.submitted = False
-
-if "saved" not in st.session_state:
-    st.session_state.saved = False
-
-if "score" not in st.session_state:
-    st.session_state.score = None
-
-if "answers" not in st.session_state:
-    st.session_state.answers = {}
+    return True, "Your quiz result was saved."
 
 
-# ---------------- HEADER ----------------
+# ==================================================
+# SESSION STATE
+# ==================================================
+
+defaults = {
+    "quiz": None,
+    "pdf_name": None,
+    "difficulty": "Medium",
+    "submitted": False,
+    "answers": {},
+    "score": None,
+    "saved": False
+}
+
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+# ==================================================
+# HEADER
+# ==================================================
 
 st.markdown("""
 <div class="hero">
     <h1>QuizCraft AI</h1>
-    <p>Turn your study PDFs into interactive quizzes with Gemini AI.</p>
-    <p>Upload • Practice • Check Your Score • Save Your Results</p>
+    <p>Turn your study PDFs into interactive quizzes.</p>
+    <p>Powered by Gemini AI and Supabase</p>
 </div>
 """, unsafe_allow_html=True)
 
-left, right = st.columns([3, 1])
+col1, col2 = st.columns(2)
 
-with left:
-    st.subheader("Create your quiz")
+with col1:
+    st.subheader("Create a quiz")
     st.write(
-        "Upload your notes, textbook chapter, or study PDF. "
-        "QuizCraft AI will create 20 multiple-choice questions."
+        "Upload your notes or textbook PDF. "
+        "Gemini will generate 20 multiple-choice questions."
     )
 
-with right:
+with col2:
     st.metric("Questions per quiz", TOTAL_QUESTIONS)
     st.metric("Options per question", 4)
 
-# ---------------- UPLOAD SECTION ----------------
+
+# ==================================================
+# PDF UPLOAD
+# ==================================================
 
 uploaded_pdf = st.file_uploader(
-    "Upload your study PDF",
+    "Upload your PDF document",
     type=["pdf"],
-    help="Upload a readable PDF containing your study material."
+    help="Choose a readable PDF under 20 MB."
 )
 
 difficulty = st.selectbox(
-    "Choose quiz difficulty",
-    ["Easy", "Medium", "Hard"]
+    "Select difficulty",
+    ["Easy", "Medium", "Hard"],
+    index=1
 )
 
-if uploaded_pdf:
-    st.info(f"Selected file: {uploaded_pdf.name}")
+if uploaded_pdf is not None:
+    st.info(
+        f"Selected: {uploaded_pdf.name} "
+        f"({uploaded_pdf.size / 1024:.1f} KB)"
+    )
 
-    if uploaded_pdf.size > 20 * 1024 * 1024:
-        st.error("Please upload a PDF smaller than 20 MB.")
-        uploaded_pdf = None
+    if uploaded_pdf.size > MAX_PDF_SIZE:
+        st.error("Your PDF is too large. Maximum size is 20 MB.")
+
+    elif uploaded_pdf.size == 0:
+        st.error("The uploaded PDF is empty.")
+
+    elif not uploaded_pdf.getvalue().startswith(b"%PDF-"):
+        st.error("This file does not appear to be a valid PDF.")
+
+
+generate_disabled = (
+    uploaded_pdf is None
+    or uploaded_pdf.size == 0
+    or uploaded_pdf.size > MAX_PDF_SIZE
+    or not uploaded_pdf.getvalue().startswith(b"%PDF-")
+)
 
 if st.button(
-    "✨ Generate 20 Questions",
+    "Generate 20 Questions",
     type="primary",
     use_container_width=True,
-    disabled=uploaded_pdf is None
+    disabled=generate_disabled
 ):
-    if uploaded_pdf is not None:
-        if uploaded_pdf.read(5) != b"%PDF-":
-            st.error("This file does not appear to be a valid PDF.")
-        else:
-            uploaded_pdf.seek(0)
-            pdf_bytes = uploaded_pdf.getvalue()
 
-            with st.spinner(
-                "Gemini is reading your PDF and creating your quiz..."
-            ):
-                try:
-                    quiz = generate_quiz(
-                        pdf_bytes,
-                        uploaded_pdf.name,
-                        difficulty
-                    )
+    with st.spinner(
+        "Gemini is reading your PDF and preparing your quiz..."
+    ):
+        try:
+            quiz = generate_quiz(
+                uploaded_pdf.getvalue(),
+                difficulty
+            )
 
-                    st.session_state.quiz = quiz
-                    st.session_state.pdf_name = uploaded_pdf.name
-                    st.session_state.submitted = False
-                    st.session_state.saved = False
-                    st.session_state.score = None
-                    st.session_state.answers = {}
+            st.session_state.quiz = quiz
+            st.session_state.pdf_name = uploaded_pdf.name
+            st.session_state.difficulty = difficulty
+            st.session_state.submitted = False
+            st.session_state.answers = {}
+            st.session_state.score = None
+            st.session_state.saved = False
 
-                    st.rerun()
+            st.rerun()
 
-                except Exception as error:
-                    st.error(
-                        "Quiz generation failed. Check your Gemini API "
-                        "key, model access, PDF, and API usage limits."
-                    )
-                    st.caption(f"Technical details: {error}")
+        except Exception as error:
+            st.error("Quiz generation failed.")
+            st.exception(error)
 
-# ---------------- QUIZ SECTION ----------------
+
+# ==================================================
+# DISPLAY QUIZ
+# ==================================================
 
 quiz = st.session_state.quiz
 
 if quiz:
+
     st.divider()
     st.subheader(quiz["title"])
+
     st.caption(
-        f"File: {st.session_state.pdf_name} · "
-        f"{TOTAL_QUESTIONS} questions · {difficulty} difficulty"
+        f"PDF: {st.session_state.pdf_name} | "
+        f"Difficulty: {st.session_state.difficulty} | "
+        f"Questions: {TOTAL_QUESTIONS}"
     )
 
     if not st.session_state.submitted:
+
         with st.form("quiz_form"):
+
             selected_answers = {}
 
             for index, question in enumerate(quiz["questions"]):
-                st.markdown(
-                    f"**Question {index + 1} of {TOTAL_QUESTIONS}**"
-                )
-                st.markdown(question["question"])
+
+                st.markdown(f"### Question {index + 1}")
+                st.write(question["question"])
 
                 selected_answers[str(index)] = st.radio(
-                    f"Choose your answer for question {index + 1}",
-                    options=range(4),
-                    format_func=lambda i, opts=question["options"]:
-                        f"{chr(65 + i)}. {opts[i]}",
+                    "Select one answer",
+                    options=[0, 1, 2, 3],
+                    format_func=lambda option, opts=question["options"]:
+                        f"{chr(65 + option)}. {opts[option]}",
                     index=None,
-                    key=f"answer_{index}",
+                    key=f"question_{index}",
                     label_visibility="collapsed"
                 )
 
@@ -389,109 +426,131 @@ if quiz:
             )
 
         if submitted:
+
             unanswered = [
-                str(i)
-                for i, answer in selected_answers.items()
-                if answer is None
+                key for key, value in selected_answers.items()
+                if value is None
             ]
 
             if unanswered:
                 st.warning(
-                    f"You have {len(unanswered)} unanswered question(s). "
-                    "Select an answer for every question before submitting."
+                    f"Please answer all 20 questions. "
+                    f"{len(unanswered)} question(s) remain unanswered."
                 )
+
             else:
                 score = sum(
-                    selected_answers[str(i)] == question["answer"]
-                    for i, question in enumerate(quiz["questions"])
+                    selected_answers[str(index)] == question["answer"]
+                    for index, question in enumerate(quiz["questions"])
                 )
 
                 st.session_state.answers = {
                     key: int(value)
                     for key, value in selected_answers.items()
                 }
+
                 st.session_state.score = int(score)
                 st.session_state.submitted = True
+
                 st.rerun()
 
-    # ---------------- RESULTS SECTION ----------------
 
-    if st.session_state.submitted:
-        score = st.session_state.score
-        percentage = round((score / TOTAL_QUESTIONS) * 100)
+# ==================================================
+# RESULTS AND EXPLANATIONS
+# ==================================================
 
-        st.success("Quiz completed!")
-        st.metric("Your Score", f"{score} / {TOTAL_QUESTIONS}")
-        st.progress(percentage / 100)
-        st.write(f"**Percentage:** {percentage}%")
+if quiz and st.session_state.submitted:
 
-        if percentage >= 80:
-            st.write("Excellent work! You understand much of this material.")
-        elif percentage >= 50:
-            st.write("Good effort. Review the explanations to improve.")
-        else:
-            st.write("Keep practicing and review your study PDF.")
+    score = st.session_state.score
+    percentage = round(score / TOTAL_QUESTIONS * 100)
 
-        # Save only once for each submitted attempt.
-        if not st.session_state.saved:
+    st.divider()
+    st.subheader("Your quiz results")
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Score", f"{score}/{TOTAL_QUESTIONS}")
+    col2.metric("Percentage", f"{percentage}%")
+    col3.metric("Incorrect", TOTAL_QUESTIONS - score)
+
+    st.progress(percentage / 100)
+
+    if percentage >= 80:
+        st.success("Excellent work!")
+    elif percentage >= 50:
+        st.info("Good effort. Review the explanations to improve.")
+    else:
+        st.warning("Keep practicing and review your study PDF.")
+
+    if not st.session_state.saved:
+
+        try:
             with st.spinner("Saving your result to Supabase..."):
+
                 saved, message = save_result(
                     st.session_state.pdf_name,
                     quiz,
                     st.session_state.answers,
-                    score
+                    score,
+                    st.session_state.difficulty
                 )
 
             if saved:
                 st.session_state.saved = True
                 st.success(message)
             else:
-                st.warning(
-                    "Your score is displayed, but it was not saved. "
-                    "Check your Supabase settings and database permissions."
-                )
-                st.caption(message)
+                st.warning(message)
 
+        except Exception as error:
+            st.error("Your result could not be saved to Supabase.")
+            st.exception(error)
+
+    st.subheader("Review your answers")
+
+    for index, question in enumerate(quiz["questions"]):
+
+        chosen = st.session_state.answers[str(index)]
+        correct = question["answer"]
+
+        st.markdown(f"### Question {index + 1}")
+        st.write(question["question"])
+
+        if chosen == correct:
+            st.success(f"Your answer: {question['options'][chosen]}")
+        else:
+            st.error(f"Your answer: {question['options'][chosen]}")
+            st.info(f"Correct answer: {question['options'][correct]}")
+
+        st.write(f"**Explanation:** {question['explanation']}")
         st.divider()
-        st.subheader("Review your answers")
 
-        for index, question in enumerate(quiz["questions"]):
-            selected = st.session_state.answers[str(index)]
-            correct = question["answer"]
-            is_correct = selected == correct
+    if st.button("Create Another Quiz", type="primary"):
 
-            st.markdown(f"### Question {index + 1}")
-            st.write(question["question"])
+        for key, value in defaults.items():
+            st.session_state[key] = value
 
-            if is_correct:
-                st.success(f"Your answer: {question['options'][selected]}")
-            else:
-                st.error(f"Your answer: {question['options'][selected]}")
-                st.info(f"Correct answer: {question['options'][correct]}")
+        st.rerun()
 
-            st.write(f"**Explanation:** {question['explanation']}")
-            st.divider()
 
-        if st.button("Create Another Quiz", type="primary"):
-            st.session_state.quiz = None
-            st.session_state.pdf_name = None
-            st.session_state.submitted = False
-            st.session_state.saved = False
-            st.session_state.score = None
-            st.session_state.answers = {}
-            st.rerun()
-
-# ---------------- SIDEBAR ----------------
+# ==================================================
+# SIDEBAR
+# ==================================================
 
 with st.sidebar:
+
     st.title("QuizCraft AI")
-    st.caption("AI-powered study assistant")
+    st.caption("Your AI study assistant")
+
     st.divider()
-    st.write("**How to use**")
+
+    st.markdown("### How it works")
     st.write("1. Upload a PDF.")
-    st.write("2. Choose difficulty.")
+    st.write("2. Choose a difficulty.")
     st.write("3. Generate 20 questions.")
-    st.write("4. Answer every question.")
+    st.write("4. Complete the quiz.")
     st.write("5. Submit and review your score.")
+
     st.divider()
-    st.caption("Powered by Gemini AI and Supabase.")
+
+    st.caption(f"Gemini model: {MODEL_NAME}")
+    st.caption("Database: Supabase")
