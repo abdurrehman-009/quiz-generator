@@ -16,7 +16,7 @@ st.set_page_config(
     layout="wide"
 )
 
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.8-flash"
 # or the cheaper one:
 # MODEL_NAME = "gemini-2.5-flash-lite"
 TOTAL_QUESTIONS = 20
